@@ -9,18 +9,69 @@ from datetime import datetime
 import smtplib
 import ssl
 from email.message import EmailMessage
+import time
 
+# ==================== 頁面設定 ====================
 st.set_page_config(page_title="股票 5分鐘分析", layout="wide")
-st.title("股票 5分鐘K線 + 關鍵水平 + 交易建議")
+st.title("股票即時分析 - 可設定時間範圍與自動刷新")
 
-# ==================== 側邊欄 ====================
-stock_symbol = st.sidebar.text_input("股票代碼", "TSLA").upper()
-lookback = st.sidebar.slider("回看K線數", 20, 200, 50)
-tolerance_pct = st.sidebar.slider("價格容忍 (%)", 0.1, 2.0, 0.5) / 100
-min_touches = st.sidebar.slider("最少觸及次數", 2, 6, 3)
-enable_email = st.sidebar.checkbox("啟用 Email 突破警示")
+# ==================== 側邊欄參數 ====================
+with st.sidebar:
+    st.header("資料設定")
+    stock_symbol = st.text_input("股票代碼", "TSLA").upper()
 
-# ==================== Email ====================
+    # period 選項
+    period_options = {
+        "1 天": "1d",
+        "5 天": "5d",
+        "1 個月": "1mo",
+        "3 個月": "3mo",
+        "6 個月": "6mo",
+        "1 年": "1y"
+    }
+    period_display = st.selectbox("時間範圍", options=list(period_options.keys()), index=1)
+    period = period_options[period_display]
+
+    # interval 選項
+    interval_options = {
+        "1 分鐘": "1m",
+        "5 分鐘": "5m",
+        "15 分鐘": "15m",
+        "30 分鐘": "30m",
+        "60 分鐘": "60m",
+        "1 小時": "1h"
+    }
+    interval_display = st.selectbox("K線間隔", options=list(interval_options.keys()), index=1)
+    interval = interval_options[interval_display]
+
+    # 回看根數
+    lookback = st.slider("回看K線數", 20, 500, 50)
+
+    # 支撐阻力參數
+    tolerance_pct = st.slider("價格容忍 (%)", 0.1, 2.0, 0.5) / 100
+    min_touches = st.slider("最少觸及次數", 2, 6, 3)
+
+    # Email 警示
+    enable_email = st.checkbox("啟用 Email 突破警示")
+
+    # 自動刷新
+    st.header("自動刷新")
+    refresh_options = {
+        "關閉": None,
+        "30 秒": 30,
+        "1 分鐘": 60,
+        "2 分鐘": 120,
+        "5 分鐘": 300
+    }
+    refresh_display = st.selectbox("自動刷新間隔", options=list(refresh_options.keys()), index=0)
+    refresh_interval = refresh_options[refresh_display]
+
+    if refresh_interval:
+        st.info(f"每 {refresh_display} 自動刷新")
+        time.sleep(refresh_interval)
+        st.rerun()
+
+# ==================== Email 發送 ====================
 @st.cache_data
 def get_email_config():
     try:
@@ -52,20 +103,22 @@ def send_email(symbol, direction, price, level):
 
 # ==================== 抓資料 ====================
 @st.cache_data(ttl=60)
-def fetch_data(symbol):
+def fetch_data(symbol, period, interval):
     try:
-        df = yf.Ticker(symbol).history(period="5d", interval="5m")
+        df = yf.Ticker(symbol).history(period=period, interval=interval)
         if df.empty: return None
         df = df.dropna().copy()
         df.index = df.index.tz_convert('America/New_York')
         return df
-    except: return None
+    except Exception as e:
+        st.error(f"抓取資料失敗: {e}")
+        return None
 
-with st.spinner(f"正在抓取 {stock_symbol} 5分鐘數據…"):
-    data = fetch_data(stock_symbol)
+with st.spinner(f"正在抓取 {stock_symbol} {interval_display} 資料（{period_display}）..."):
+    data = fetch_data(stock_symbol, period, interval)
 
 if data is None or data.empty:
-    st.error("無法取得資料")
+    st.error("無法取得資料，請檢查代碼或網路")
     st.stop()
 
 data = data.tail(lookback).copy()
@@ -121,29 +174,24 @@ def find_levels(df, tol, min_touch):
 
 supports, resists, _ = find_levels(data, tolerance_pct, min_touches)
 
-# ---- 若偵測不到足夠水平，自動補上最近高低點 ----
+# ---- 補足 R1/R2, S1/S2 ----
 if not resists:
     r1 = data['High'].max()
     resists = [{"price": round(r1,2), "touches": 1, "type": "Resistance"}]
 else:
-    r1 = resists[0]["price"]
     resists = resists[:2]
+while len(resists) < 2:
+    second = data['High'].nlargest(2).iloc[-1] if len(data['High'].nlargest(2)) > 1 else resists[-1]["price"]*0.98
+    resists.append({"price": round(second,2), "touches": 1, "type": "Resistance"})
 
 if not supports:
     s1 = data['Low'].min()
     supports = [{"price": round(s1,2), "touches": 1, "type": "Support"}]
 else:
-    s1 = supports[0]["price"]
     supports = supports[:2]
-
-# 補齊 R2、S2（若不足 2 個）
-while len(resists) < 2:
-    # 找次高點
-    second_high = data['High'].nlargest(2).iloc[-1] if len(data['High'].nlargest(2)) > 1 else resists[-1]["price"]*0.98
-    resists.append({"price": round(second_high,2), "touches": 1, "type": "Resistance"})
 while len(supports) < 2:
-    second_low = data['Low'].nsmallest(2).iloc[-1] if len(data['Low'].nsmallest(2)) > 1 else supports[-1]["price"]*1.02
-    supports.append({"price": round(second_low,2), "touches": 1, "type": "Support"})
+    second = data['Low'].nsmallest(2).iloc[-1] if len(data['Low'].nsmallest(2)) > 1 else supports[-1]["price"]*1.02
+    supports.append({"price": round(second,2), "touches": 1, "type": "Support"})
 
 # ==================== 關鍵水平表格 ====================
 st.subheader("當前關鍵水平")
@@ -184,7 +232,6 @@ st.subheader("交易建議（示意）")
 r1_price = resists[0]["price"]
 r2_price = resists[1]["price"]
 s1_price = supports[0]["price"]
-s2_price = supports[1]["price"]
 
 if cur_price > r1_price:
     suggestion = f"**突破 {r1_price} 並站穩** → 看多至 {r2_price}。"
@@ -200,27 +247,23 @@ st.markdown(suggestion)
 # ==================== 圖表 ====================
 fig = make_subplots(
     rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-    subplot_titles=("K線 + 成交量", "RSI (14)", "MACD (12,26,9)", "支撐/阻力"),
+    subplot_titles=(f"K線 + 成交量 ({interval_display})", "RSI (14)", "MACD (12,26,9)", "支撐/阻力"),
     row_heights=[0.5,0.2,0.2,0.1]
 )
 
-# K線 + 成交量
 colors = ['green' if o < c else 'red' for o, c in zip(data['Open'], data['Close'])]
 fig.add_trace(go.Candlestick(x=data['time'], open=data['Open'], high=data['High'],
                              low=data['Low'], close=data['Close'], name="K線"), row=1, col=1)
 fig.add_trace(go.Bar(x=data['time'], y=data['Volume'], name="成交量", marker_color=colors), row=1, col=1)
 
-# RSI
 fig.add_trace(go.Scatter(x=data['time'], y=data['RSI'], name="RSI", line=dict(color='purple')), row=2, col=1)
 fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
 fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-# MACD
 fig.add_trace(go.Scatter(x=data['time'], y=data['MACD'], name="MACD", line=dict(color='blue')), row=3, col=1)
 fig.add_trace(go.Scatter(x=data['time'], y=data['MACD_signal'], name="Signal", line=dict(color='orange')), row=3, col=1)
-fig.add_trace(go.Bar(x=data['time'], y=data['MACD_hist'], name="Histogram", marker_color='gray'), row=3, col=1)
+fig.add_trace(go.Bar(x=data['time'], y=data['MACD_hist'], name="Hist", marker_color='gray'), row=3, col=1)
 
-# 水平線
 for s in supports:
     fig.add_hline(y=s['price'], line_color="green", line_dash="dash",
                   annotation_text=f"S{supports.index(s)+1} ${s['price']}", row=4, col=1)
@@ -228,7 +271,7 @@ for r in resists:
     fig.add_hline(y=r['price'], line_color="red", line_dash="dash",
                   annotation_text=f"R{resists.index(r)+1} ${r['price']}", row=4, col=1)
 
-fig.update_layout(height=900, title=f"{stock_symbol} 5分鐘圖表（最近 {lookback} 根）", template="plotly_dark")
+fig.update_layout(height=900, title=f"{stock_symbol} {interval_display} 圖表（{period_display}）", template="plotly_dark")
 st.plotly_chart(fig, use_container_width=True)
 
 # ==================== 指標 ====================
@@ -238,8 +281,9 @@ c2.metric("RSI", f"{data['RSI'].iloc[-1]:.1f}")
 c3.metric("MACD", f"{data['MACD'].iloc[-1]:.3f}")
 c4.metric("成交量", f"{data['Volume'].iloc[-1]:,.0f}")
 
-st.caption(f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"數據來源：Yahoo Finance | 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-if st.button("刷新"):
+# 手動刷新按鈕
+if st.button("立即刷新"):
     st.cache_data.clear()
     st.rerun()
