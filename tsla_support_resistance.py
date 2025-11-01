@@ -1,4 +1,4 @@
-# stock_analysis_multi.py
+# stock_multi_switch.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -9,23 +9,23 @@ from datetime import datetime
 import smtplib
 import ssl
 from email.message import EmailMessage
-import time
 
 # ==================== 頁面設定 ====================
-st.set_page_config(page_title="多股即時分析", layout="wide")
-st.title("多股即時分析 - 支援切換 + 自動刷新 + 倒數計時")
+st.set_page_config(page_title="多股輪播分析", layout="wide")
+st.title("多股輪播即時分析 - 自動切換 + 倒數計時 + 自動刷新")
 
-# ==================== 側邊欄參數 ====================
+# ==================== 側邊欄設定 ====================
 with st.sidebar:
     st.header("多股設定")
     symbols_input = st.text_input("股票代碼（逗號分隔）", "TSLA, AAPL, NVDA")
     symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
-    # period & interval
+    # 時間範圍
     period_options = {"1 天": "1d", "5 天": "5d", "1 個月": "1mo", "3 個月": "3mo", "6 個月": "6mo", "1 年": "1y"}
     period_display = st.selectbox("時間範圍", options=list(period_options.keys()), index=1)
     period = period_options[period_display]
 
+    # K線間隔
     interval_options = {"1 分鐘": "1m", "5 分鐘": "5m", "15 分鐘": "15m", "30 分鐘": "30m", "60 分鐘": "60m", "1 小時": "1h"}
     interval_display = st.selectbox("K線間隔", options=list(interval_options.keys()), index=1)
     interval = interval_options[interval_display]
@@ -35,49 +35,57 @@ with st.sidebar:
     min_touches = st.slider("最少觸及次數", 2, 6, 3)
     enable_email = st.checkbox("啟用 Email 突破警示")
 
+    st.header("輪播與刷新")
     # 切換間隔
-    st.header("切換與刷新")
-    switch_options = {"關閉": None, "10 秒": 10, "30 秒": 30, "1 分鐘": 60, "2 分鐘": 120}
+    switch_options = {"關閉": 0, "10 秒": 10, "30 秒": 30, "1 分鐘": 60, "2 分鐘": 120}
     switch_display = st.selectbox("切換間隔", options=list(switch_options.keys()), index=2)
     switch_interval = switch_options[switch_display]
 
-    refresh_options = {"關閉": None, "30 秒": 30, "1 分鐘": 60, "2 分鐘": 120, "5 分鐘": 300}
-    refresh_display = st.selectbox("自動刷新", options=list(refresh_options.keys()), index=0)
+    # 資料刷新間隔
+    refresh_options = {"關閉": 0, "30 秒": 30, "1 分鐘": 60, "2 分鐘": 120, "5 分鐘": 300}
+    refresh_display = st.selectbox("自動刷新資料", options=list(refresh_options.keys()), index=0)
     refresh_interval = refresh_options[refresh_display]
 
-# ==================== 狀態管理 ====================
+# ==================== 狀態初始化 ====================
 if "current_idx" not in st.session_state:
     st.session_state.current_idx = 0
-if "last_switch" not in st.session_state:
-    st.session_state.last_switch = time.time()
+if "last_switch_time" not in st.session_state:
+    st.session_state.last_switch_time = datetime.now().timestamp()
+if "last_refresh_time" not in st.session_state:
+    st.session_state.last_refresh_time = datetime.now().timestamp()
 
 # ==================== 倒數計時器 ====================
-countdown_placeholder = st.empty()
-switch_countdown = st.empty()
+now = datetime.now().timestamp()
 
-if switch_interval and len(symbols) > 1:
-    elapsed = time.time() - st.session_state.last_switch
+# 切換倒數
+switch_countdown = st.empty()
+if switch_interval > 0 and len(symbols) > 1:
+    elapsed = now - st.session_state.last_switch_time
     remaining = max(0, switch_interval - int(elapsed))
     switch_countdown.info(f"切換至下一支：{remaining} 秒")
     if remaining <= 0:
         st.session_state.current_idx = (st.session_state.current_idx + 1) % len(symbols)
-        st.session_state.last_switch = time.time()
+        st.session_state.last_switch_time = now
         st.rerun()
 
-if refresh_interval:
-    for i in range(refresh_interval, 0, -1):
-        countdown_placeholder.info(f"資料刷新：{i} 秒")
-        time.sleep(1)
-    st.cache_data.clear()
-    st.rerun()
+# 資料刷新倒數
+refresh_countdown = st.empty()
+if refresh_interval > 0:
+    elapsed = now - st.session_state.last_refresh_time
+    remaining = max(0, refresh_interval - int(elapsed))
+    refresh_countdown.info(f"資料刷新：{remaining} 秒")
+    if remaining <= 0:
+        st.session_state.last_refresh_time = now
+        st.cache_data.clear()
+        st.rerun()
 
-# ==================== 選擇當前股票 ====================
+# ==================== 當前股票 ====================
 if not symbols:
-    st.error("請輸入至少一支股票代碼")
+    st.error("請輸入至少一支股票")
     st.stop()
 
 current_symbol = symbols[st.session_state.current_idx]
-st.header(f"目前顯示：{current_symbol}（{st.session_state.current_idx + 1}/{len(symbols)}）")
+st.header(f"目前顯示：**{current_symbol}**（{st.session_state.current_idx + 1}/{len(symbols)}）")
 
 # ==================== Email ====================
 @st.cache_data
@@ -124,7 +132,7 @@ with st.spinner(f"抓取 {current_symbol} 資料..."):
     data = fetch_data(current_symbol, period, interval)
 
 if data is None or data.empty:
-    st.error(f"{current_symbol} 無法取得資料")
+    st.error(f"{current_symbol} 無資料")
     st.stop()
 
 data = data.tail(lookback).copy()
@@ -229,7 +237,7 @@ st.markdown(suggestion)
 
 # ==================== 圖表 ====================
 fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-                    subplot_titles=(f"K線 + 成交量", "RSI", "MACD", "支撐/阻力"),
+                    subplot_titles=("K線 + 成交量", "RSI", "MACD", "支撐/阻力"),
                     row_heights=[0.5,0.2,0.2,0.1])
 
 colors = ['green' if o < c else 'red' for o, c in zip(data['Open'], data['Close'])]
