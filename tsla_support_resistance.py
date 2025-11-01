@@ -20,7 +20,7 @@ tolerance_pct = st.sidebar.slider("價格容忍 (%)", 0.1, 2.0, 0.5) / 100
 min_touches = st.sidebar.slider("最少觸及次數", 2, 6, 3)
 enable_email = st.sidebar.checkbox("啟用 Email 突破警示")
 
-# ==================== Email 發送 ====================
+# ==================== Email ====================
 @st.cache_data
 def get_email_config():
     try:
@@ -46,7 +46,7 @@ def send_email(symbol, direction, price, level):
             s.starttls()
             s.login(cfg["sender"], cfg["pw"])
             s.send_message(msg)
-        st.sidebar.success(f"Email 已發送")
+        st.sidebar.success("Email 已發送")
     except Exception as e:
         st.sidebar.error(f"Email 失敗: {e}")
 
@@ -61,11 +61,11 @@ def fetch_data(symbol):
         return df
     except: return None
 
-with st.spinner(f"抓取 {stock_symbol}..."):
+with st.spinner(f"正在抓取 {stock_symbol} 5分鐘數據…"):
     data = fetch_data(stock_symbol)
 
 if data is None or data.empty:
-    st.error("無法取得數據")
+    st.error("無法取得資料")
     st.stop()
 
 data = data.tail(lookback).copy()
@@ -77,7 +77,7 @@ def calc_rsi(s, p=14):
     d = s.diff()
     up = d.clip(lower=0).rolling(p).mean()
     down = -d.clip(upper=0).rolling(p).mean()
-    return 100 - (100 / (1 + up/down))
+    return 100 - (100 / (1 + up / down))
 
 def calc_macd(s, f=12, sl=26, sig=9):
     emaf = s.ewm(span=f, adjust=False).mean()
@@ -97,8 +97,11 @@ def find_levels(df, tol, min_touch):
     sorted_p = np.sort(prices)
     clusters, cur = [], [sorted_p[0]]
     for p in sorted_p[1:]:
-        if p <= cur[-1] * (1 + tol): cur.append(p)
-        else: clusters.append(np.mean(cur)); cur = [p]
+        if p <= cur[-1] * (1 + tol):
+            cur.append(p)
+        else:
+            clusters.append(np.mean(cur))
+            cur = [p]
     if cur: clusters.append(np.mean(cur))
 
     levels = []
@@ -116,31 +119,52 @@ def find_levels(df, tol, min_touch):
     resists  = sorted([x for x in levels if "Resistance" in x["type"]], key=lambda x: x["price"], reverse=True)
     return supports[:2], resists[:2], levels
 
-supports, resists, all_levels = find_levels(data, tolerance_pct, min_touches)
+supports, resists, _ = find_levels(data, tolerance_pct, min_touches)
+
+# ---- 若偵測不到足夠水平，自動補上最近高低點 ----
+if not resists:
+    r1 = data['High'].max()
+    resists = [{"price": round(r1,2), "touches": 1, "type": "Resistance"}]
+else:
+    r1 = resists[0]["price"]
+    resists = resists[:2]
+
+if not supports:
+    s1 = data['Low'].min()
+    supports = [{"price": round(s1,2), "touches": 1, "type": "Support"}]
+else:
+    s1 = supports[0]["price"]
+    supports = supports[:2]
+
+# 補齊 R2、S2（若不足 2 個）
+while len(resists) < 2:
+    # 找次高點
+    second_high = data['High'].nlargest(2).iloc[-1] if len(data['High'].nlargest(2)) > 1 else resists[-1]["price"]*0.98
+    resists.append({"price": round(second_high,2), "touches": 1, "type": "Resistance"})
+while len(supports) < 2:
+    second_low = data['Low'].nsmallest(2).iloc[-1] if len(data['Low'].nsmallest(2)) > 1 else supports[-1]["price"]*1.02
+    supports.append({"price": round(second_low,2), "touches": 1, "type": "Support"})
 
 # ==================== 關鍵水平表格 ====================
 st.subheader("當前關鍵水平")
-level_data = []
+level_rows = []
 for i, r in enumerate(resists):
-    level_data.append({
+    level_rows.append({
         "類型": f"阻力 R{i+1}",
         "價格": f"${r['price']}",
         "觸及次數": f"{r['touches']} 次",
         "說明": "短期賣壓強" if i == 0 else "中期天花板"
     })
 for i, s in enumerate(supports):
-    level_data.append({
+    level_rows.append({
         "類型": f"支撐 S{i+1}",
         "價格": f"${s['price']}",
         "觸及次數": f"{s['touches']} 次",
         "說明": "強力支撐" if i == 0 else "中間支撐"
     })
 
-if level_data:
-    df_levels = pd.DataFrame(level_data)
-    st.table(df_levels)
-else:
-    st.info("未偵測到足夠觸及的水平線")
+df_levels = pd.DataFrame(level_rows)
+st.table(df_levels)
 
 # ==================== 交易建議 ====================
 cur_price = data['Close'].iloc[-1]
@@ -151,25 +175,22 @@ for r in resists:
     if prev_price < r['price'] <= cur_price:
         st.warning(f"突破阻力 ${r['price']}！")
         send_email(stock_symbol, "上漲突破", cur_price, r['price'])
-
 for s in supports:
     if prev_price > s['price'] >= cur_price:
         st.error(f"跌破支撐 ${s['price']}！")
         send_email(stock_symbol, "下跌突破", cur_price, s['price'])
 
-# 交易建議
 st.subheader("交易建議（示意）")
-r1 = resists[0]['price'] if resists else None
-r2 = resists[1]['price'] if len(resists) > 1 else None
-s1 = supports[0]['price'] if supports else None
-s2 = supports[1]['price'] if len(supports) > 1 else None
+r1_price = resists[0]["price"]
+r2_price = resists[1]["price"]
+s1_price = supports[0]["price"]
+s2_price = supports[1]["price"]
 
-suggestion = ""
-if r1 and cur_price > r1:
-    suggestion = f"**突破 {r1} 並站穩** → 看多至 {r2 if r2 else '更高阻力'}。"
-elif s1 and cur_price < s1:
-    suggestion = f"**跌破 {s1}** → 可能下探 {s1-5 if s1 else '更低'} 或更低。"
-elif s1 and r1 and s1 < cur_price < r1:
+if cur_price > r1_price:
+    suggestion = f"**突破 {r1_price} 並站穩** → 看多至 {r2_price}。"
+elif cur_price < s1_price:
+    suggestion = f"**跌破 {s1_price}** → 可能下探 {s1_price-5 if s1_price > 10 else s1_price*0.95:.2f} 或更低。"
+elif s1_price <= cur_price <= r1_price:
     suggestion = f"目前價格在 **S1 ~ R1 之間震盪**，適合區間操作。"
 else:
     suggestion = "觀察中，等待明確訊號。"
@@ -177,9 +198,11 @@ else:
 st.markdown(suggestion)
 
 # ==================== 圖表 ====================
-fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-                    subplot_titles=("K線 + 成交量", "RSI", "MACD", "支撐/阻力"),
-                    row_heights=[0.5,0.2,0.2,0.1])
+fig = make_subplots(
+    rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+    subplot_titles=("K線 + 成交量", "RSI (14)", "MACD (12,26,9)", "支撐/阻力"),
+    row_heights=[0.5,0.2,0.2,0.1]
+)
 
 # K線 + 成交量
 colors = ['green' if o < c else 'red' for o, c in zip(data['Open'], data['Close'])]
@@ -195,20 +218,25 @@ fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 # MACD
 fig.add_trace(go.Scatter(x=data['time'], y=data['MACD'], name="MACD", line=dict(color='blue')), row=3, col=1)
 fig.add_trace(go.Scatter(x=data['time'], y=data['MACD_signal'], name="Signal", line=dict(color='orange')), row=3, col=1)
-fig.add_trace(go.Bar(x=data['time'], y=data['MACD_hist'], name="Hist", marker_color='gray'), row=3, col=1)
+fig.add_trace(go.Bar(x=data['time'], y=data['MACD_hist'], name="Histogram", marker_color='gray'), row=3, col=1)
 
 # 水平線
-for s in supports: fig.add_hline(y=s['price'], line_color="green", line_dash="dash", row=4, col=1)
-for r in resists:  fig.add_hline(y=r['price'], line_color="red",   line_dash="dash", row=4, col=1)
+for s in supports:
+    fig.add_hline(y=s['price'], line_color="green", line_dash="dash",
+                  annotation_text=f"S{supports.index(s)+1} ${s['price']}", row=4, col=1)
+for r in resists:
+    fig.add_hline(y=r['price'], line_color="red", line_dash="dash",
+                  annotation_text=f"R{resists.index(r)+1} ${r['price']}", row=4, col=1)
 
-fig.update_layout(height=900, title=f"{stock_symbol} 5分鐘圖表", template="plotly_dark")
+fig.update_layout(height=900, title=f"{stock_symbol} 5分鐘圖表（最近 {lookback} 根）", template="plotly_dark")
 st.plotly_chart(fig, use_container_width=True)
 
 # ==================== 指標 ====================
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("最新價格", f"${cur_price:.2f}")
 c2.metric("RSI", f"{data['RSI'].iloc[-1]:.1f}")
-c3.metric("成交量", f"{data['Volume'].iloc[-1]:,.0f}")
+c3.metric("MACD", f"{data['MACD'].iloc[-1]:.3f}")
+c4.metric("成交量", f"{data['Volume'].iloc[-1]:,.0f}")
 
 st.caption(f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
